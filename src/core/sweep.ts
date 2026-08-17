@@ -19,9 +19,13 @@
  *   2. LINK/TIMELINE EXTRACTION [CX-P0.3] — zero-LLM, deterministic. The
  *      same per-page cores `gbrain extract links|timeline --source db`
  *      runs: extractPageLinks + parseTimelineEntries, endpoint-validated
- *      through resolveCandidateSources and batch-written via
- *      addLinksBatch / addTimelineEntriesBatch, then watermark-stamped
- *      (stampExtracted) since both kinds ran.
+ *      through resolveCandidateSources. Stale pages are selected through
+ *      the links_extracted_at predicate (listStalePagesForExtraction) so
+ *      repeated bounded sweeps converge (#4196); extraction-owned edges
+ *      are reconciled (delete-before-insert) to match local put_page's
+ *      runAutoLink removal semantics; batch-written via addLinksBatch /
+ *      addTimelineEntriesBatch, then watermark-stamped
+ *      (markPagesExtractedBatch) since both kinds ran.
  *
  *   3. CORPUS INGEST [CX-P0.1] — LLM-backed, spend-gated. Unprocessed
  *      `.txt` files in the dream corpus dir run through the narrowest
@@ -85,7 +89,11 @@ export interface SweepOpts {
   batchLimit?: number;
   /** Wall-clock budget; the sweep stops between items when exceeded. Default 5000. */
   budgetMs?: number;
-  /** Recency window (days) for "recently-modified pages". Default 7. */
+  /**
+   * Recency window (days) for pass 1's "recently-modified pages" fence scan.
+   * Pass 2 uses the links_extracted_at stale predicate instead (#4196), so
+   * bounded sweeps converge on the whole backlog. Default 7.
+   */
   recentDays?: number;
   /** Diagnostic sink (stderr in serve contexts). Default: silent. */
   log?: (msg: string) => void;
@@ -204,7 +212,6 @@ export async function runMaintenanceSweep(
         await runLinksTimelinePass(engine, {
           sourceId,
           batchLimit,
-          cutoffIso,
           overBudget,
           report,
           skip,
@@ -261,14 +268,22 @@ interface PassCtx {
  * links|timeline --source db` (extract.ts:extractLinksFromDB /
  * extractTimelineFromDB): extractPageLinks + parseTimelineEntries, with
  * resolveCandidateSources doing the multi-source endpoint validation and
- * stampExtracted advancing the links_extracted_at watermark (both kinds
- * run here, so stamping is correct per extract.ts's C3/D6 rule).
+ * markPagesExtractedBatch advancing the links_extracted_at watermark (both
+ * kinds run here, so stamping is correct per extract.ts's C3/D6 rule).
+ *
+ * #4196: selection reads the watermark it stamps (the shared
+ * listStalePagesForExtraction predicate extract --stale uses), so repeated
+ * bounded sweeps converge instead of re-chewing the same newest-batchLimit
+ * window; and extraction-owned edges are reconciled (delete-before-insert),
+ * matching the removal semantics local put_page gets from runAutoLink —
+ * remote put_page skips that inline, and this pass is its designated
+ * backstop.
  */
 async function runLinksTimelinePass(
   engine: BrainEngine,
-  ctx: PassCtx & { cutoffIso: string },
+  ctx: PassCtx,
 ): Promise<void> {
-  const { sourceId, batchLimit, cutoffIso, overBudget, report, skip } = ctx;
+  const { sourceId, batchLimit, overBudget, report, skip } = ctx;
 
   const {
     extractPageLinks,
@@ -277,6 +292,7 @@ async function runLinksTimelinePass(
     isGlobalBasenameEnabled,
     isAutoLinkEnabled,
     isAutoTimelineEnabled,
+    LINK_EXTRACTOR_VERSION_TS,
   } = await import('./link-extraction.ts');
 
   // Respect the same operator kill switches put_page's inline hooks honor.
@@ -288,21 +304,24 @@ async function runLinksTimelinePass(
   if (!timelineEnabled) skip('auto_timeline_disabled');
   if (!linksEnabled && !timelineEnabled) return;
 
-  const recent = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug FROM pages
-      WHERE source_id = $1
-        AND deleted_at IS NULL
-        AND updated_at >= $2::timestamptz
-      ORDER BY updated_at DESC
-      LIMIT $3`,
-    [sourceId, cutoffIso, batchLimit],
-  );
+  // #4196: select through the SAME stale predicate as `gbrain extract
+  // --stale` (links_extracted_at IS NULL / < versionTs / < updated_at) so
+  // the watermark this pass stamps is also the cursor that moves it forward.
+  // No afterPageId — the stamp itself is the cross-sweep cursor, and the
+  // batchLimit + wall-clock budget stay the per-sweep size bound. Rows carry
+  // page content + the full-µs updated_at_iso projection, so no per-slug
+  // getPage loop is needed.
+  const recent = await engine.listStalePagesForExtraction({
+    batchSize: batchLimit,
+    sourceId,
+    versionTs: LINK_EXTRACTOR_VERSION_TS,
+  });
   if (recent.length === 0) return;
 
-  // resolveCandidateSources + stampExtracted are the shared helpers the
-  // extract command exports precisely so sibling walkers can't drift from
-  // its F10 multi-source resolution (see extract.ts:114).
-  const { resolveCandidateSources, stampExtracted } = await import('../commands/extract.ts');
+  // resolveCandidateSources is the shared helper the extract command exports
+  // precisely so sibling walkers can't drift from its F10 multi-source
+  // resolution (see extract.ts:114).
+  const { resolveCandidateSources } = await import('../commands/extract.ts');
 
   const resolver = makeResolver(engine, { mode: 'batch', sourceId });
   const globalBasename = await isGlobalBasenameEnabled(engine);
@@ -310,20 +329,18 @@ async function runLinksTimelinePass(
   type Extracted = Awaited<ReturnType<typeof extractPageLinks>>;
 
   const tlBatch: TimelineBatchInput[] = [];
-  const processedRefs: Array<{ slug: string; source_id: string }> = [];
+  const processedRefs: Array<{ slug: string; source_id: string; extractedAt: string }> = [];
   const pageCandidates: Array<{ slug: string; candidates: Extracted['candidates'] }> = [];
 
-  // Phase 1: per-page extraction. The per-slug getPage loop stays a loop —
-  // BrainEngine has no batch read-by-slug-list primitive (resolveSlugsByPaths
-  // is path→slug only), and the loop is bounded by batchLimit (default 20).
+  // Phase 1: per-page extraction over the stale rows (content included —
+  // the old per-slug getPage loop collapsed into the selection query).
   for (let i = 0; i < recent.length; i++) {
     if (overBudget()) {
       skip('budget_exhausted:links_timeline', recent.length - i);
       break;
     }
-    const slug = recent[i].slug;
-    const page = await engine.getPage(slug, { sourceId });
-    if (!page) continue;
+    const page = recent[i];
+    const slug = page.slug;
 
     const fullContent = page.compiled_truth + '\n' + page.timeline;
 
@@ -353,7 +370,15 @@ async function runLinksTimelinePass(
       }
     }
 
-    processedRefs.push({ slug, source_id: sourceId });
+    // D4 race + #1768 µs rule (extract.ts:extractStaleFromDB): stamp the
+    // row's READ full-µs updated_at, never now() — a concurrent edit landing
+    // between the SELECT and the stamp keeps the page stale. The versionTs
+    // floor lifts pages older than the extractor version to the threshold so
+    // they clear instead of re-extracting forever.
+    const stampIso = page.updated_at.getTime() >= Date.parse(LINK_EXTRACTOR_VERSION_TS)
+      ? page.updated_at_iso
+      : LINK_EXTRACTOR_VERSION_TS;
+    processedRefs.push({ slug, source_id: page.source_id, extractedAt: stampIso });
   }
 
   // Phase 2: endpoint validation is scoped to the slugs the candidates
@@ -394,6 +419,34 @@ async function runLinksTimelinePass(
     }
   }
 
+  // #4196 reconciliation: local put_page REMOVES edges the page no longer
+  // names (runAutoLink); remote put_page skips that inline and this pass is
+  // its backstop — so delete the extraction-owned edges of every processed
+  // page (including zero-candidate pages: a page whose last link was removed
+  // is exactly the reconciliation case) before the batch insert re-creates
+  // the current set. Scope mirrors runAutoLink's reconcilable set MINUS
+  // frontmatter: this pass extracts with skipFrontmatter, so it never
+  // re-inserts frontmatter edges and must not delete them. 'manual' and
+  // every other provenance survive, same as runAutoLink. Ordering is
+  // delete → insert → stamp: a crash mid-way leaves the page unstamped, so
+  // the next sweep re-extracts it (inserts are ON CONFLICT DO NOTHING).
+  if (linksEnabled && processedRefs.length > 0) {
+    const CHUNK = 200;
+    for (let i = 0; i < processedRefs.length; i += CHUNK) {
+      const chunk = processedRefs.slice(i, i + CHUNK);
+      const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
+      await engine.executeRaw(
+        `DELETE FROM links
+          WHERE from_page_id IN (
+                  SELECT id FROM pages
+                   WHERE source_id = $1 AND slug IN (${placeholders})
+                )
+            AND (link_source IN ('markdown', 'wikilink-resolved') OR link_source IS NULL)`,
+        [sourceId, ...chunk.map(r => r.slug)],
+      );
+    }
+  }
+
   // Engine batch primitives self-retry; default auditSite labels apply
   // (BATCH_AUDIT_SITES is a closed enum owned by retry.ts).
   if (linkBatch.length > 0) {
@@ -403,9 +456,12 @@ async function runLinksTimelinePass(
     report.timelineExtracted += await engine.addTimelineEntriesBatch(tlBatch); // gbrain-allow-direct-insert: same extract-path rationale as addLinksBatch above [CX-P0.3]
   }
   // Stamp only when BOTH kinds ran for these pages (extract.ts C3/D6:
-  // links_extracted_at covers links AND timeline).
+  // links_extracted_at covers links AND timeline). Direct call, not the
+  // swallowing stampExtracted: the watermark is now the progress cursor, so
+  // a stamp failure must surface (as this pass's skip + log) rather than
+  // silently re-chew the same batch every sweep (CDX-4 posture).
   if (linksEnabled && timelineEnabled && processedRefs.length > 0) {
-    await stampExtracted(engine, processedRefs);
+    await engine.markPagesExtractedBatch(processedRefs, new Date().toISOString());
   }
 }
 

@@ -21,6 +21,7 @@ import {
   type SweepReport,
 } from '../src/core/sweep.ts';
 import { isTotalFailure, runSweep, SWEEP_HELP } from '../src/commands/sweep.ts';
+import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { _resetStdoutRedirectForTests } from '../src/core/console-prefix.ts';
 import type { CapabilityReport } from '../src/core/capability.ts';
@@ -208,6 +209,91 @@ describe('runMaintenanceSweep — link/timeline extraction [CX-P0.3]', () => {
       await engine.setConfig('auto_link', 'true');
       await engine.setConfig('auto_timeline', 'true');
     }
+  });
+});
+
+describe('runMaintenanceSweep — pass 2 reconciliation + watermark progress (#4196)', () => {
+  test('an edge the page no longer names is removed by the next sweep; manual/frontmatter edges survive', async () => {
+    await seedPage('concepts/target-a', 'note', 'Target page.');
+    await seedPage('concepts/other-a', 'note', 'Another page.');
+    await seedPage('concepts/writer-a', 'note', 'References [Target](concepts/target-a).');
+
+    const r1 = await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYLESS });
+    expect(r1.linksExtracted).toBeGreaterThanOrEqual(1);
+
+    const edgeCount = async () => {
+      const rows = await engine.executeRaw<{ n: string }>(
+        `SELECT COUNT(*) AS n FROM links l
+           JOIN pages pf ON pf.id = l.from_page_id
+           JOIN pages pt ON pt.id = l.to_page_id
+          WHERE pf.slug = 'concepts/writer-a' AND pt.slug = 'concepts/target-a'
+            AND (l.link_source IN ('markdown', 'wikilink-resolved') OR l.link_source IS NULL)`,
+      );
+      return parseInt(rows[0].n, 10);
+    };
+    expect(await edgeCount()).toBeGreaterThanOrEqual(1);
+
+    // Non-extraction provenance on the same page must survive reconciliation.
+    await engine.addLink('concepts/writer-a', 'concepts/other-a', '', 'related', 'manual');
+    await engine.addLink('concepts/writer-a', 'concepts/other-a', '', 'mentions', 'frontmatter', 'concepts/writer-a', 'mentions');
+
+    // Remote put_page rewrite drops the reference (the sweep is the designated
+    // backstop for these writes — local put_page would have reconciled inline).
+    await engine.executeRaw(
+      `UPDATE pages SET compiled_truth = 'The reference is gone.', updated_at = clock_timestamp()
+        WHERE slug = 'concepts/writer-a' AND source_id = 'default'`,
+    );
+    await runMaintenanceSweep(engine, { sourceId: 'default', capabilities: KEYLESS });
+
+    expect(await edgeCount()).toBe(0);
+    const kept = await engine.executeRaw<{ link_source: string }>(
+      `SELECT l.link_source FROM links l
+         JOIN pages pf ON pf.id = l.from_page_id
+         JOIN pages pt ON pt.id = l.to_page_id
+        WHERE pf.slug = 'concepts/writer-a' AND pt.slug = 'concepts/other-a'
+        ORDER BY l.link_source`,
+    );
+    expect(kept.map(k => k.link_source)).toEqual(['frontmatter', 'manual']);
+  });
+
+  test('repeated sweeps make forward progress past batchLimit', async () => {
+    for (let i = 0; i < 25; i++) {
+      const n = String(i).padStart(2, '0');
+      await seedPage(`bulk/t-${n}`, 'note', 'target');
+    }
+    for (let i = 0; i < 25; i++) {
+      const n = String(i).padStart(2, '0');
+      await seedPage(`bulk/w-${n}`, 'note', `points at [t](bulk/t-${n})`);
+    }
+
+    // 50 stale pages at batchLimit 20: a converging sweep drains the backlog
+    // in ≤3 passes (run 4 for slack). The pre-fix selection re-chews the same
+    // newest-20 window forever, so writers seeded first never get an edge.
+    for (let pass = 0; pass < 4; pass++) {
+      await runMaintenanceSweep(engine, {
+        sourceId: 'default',
+        batchLimit: 20,
+        budgetMs: 60_000,
+        capabilities: KEYLESS,
+      });
+    }
+
+    const withEdge = await engine.executeRaw<{ n: string }>(
+      `SELECT COUNT(DISTINCT pf.slug) AS n FROM links l
+         JOIN pages pf ON pf.id = l.from_page_id
+        WHERE pf.slug LIKE 'bulk/w-%'`,
+    );
+    expect(parseInt(withEdge[0].n, 10)).toBe(25);
+
+    // Every processed page cleared the stale predicate — pins the µs-exact
+    // updated_at stamp (#1768 class) and the versionTs floor on real
+    // Postgres timestamps.
+    expect(
+      await engine.countStalePagesForExtraction({
+        sourceId: 'default',
+        versionTs: LINK_EXTRACTOR_VERSION_TS,
+      }),
+    ).toBe(0);
   });
 });
 
@@ -450,7 +536,9 @@ describe('runMaintenanceSweep — bounded link resolution (no listAllPageRefs)',
     // The bounded resolver path: endpoint refs come from a candidate-scoped
     // lookup, never the whole-brain (slug, source_id) enumeration.
     expect(log).not.toContain('listAllPageRefs');
-    expect(log).toContain('getPage');
+    // #4196: page content rides the stale-selection rows; no per-slug
+    // getPage loop in pass 2 anymore.
+    expect(log).toContain('listStalePagesForExtraction');
   });
 
   test('timeline-only sweep (zero link candidates) skips the ref lookup entirely', async () => {
@@ -466,8 +554,9 @@ describe('runMaintenanceSweep — bounded link resolution (no listAllPageRefs)',
     });
     expect(r.timelineExtracted).toBe(1);
     expect(log).not.toContain('listAllPageRefs');
-    // Exactly two raw queries: the pass-1 fence scan and the pass-2 recency
-    // scan. No candidates ⇒ no third (ref-lookup) query.
+    // Exactly two raw queries: the pass-1 fence scan and the pass-2
+    // reconciliation delete (#4196). No candidates ⇒ no third (ref-lookup)
+    // query.
     expect(log.filter((m) => m === 'executeRaw').length).toBe(2);
   });
 });
