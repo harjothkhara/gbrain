@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.154.0] - 2026-10-10
+
+**A schema pack chosen only in the database config now counts when the cycle decides which phases to run (#6393).**
+
+`packDeclaresPhase` resolved the active pack without the database tier, so a brain whose `schema_pack` was set only with `gbrain config set schema_pack <name>` had its pack-gated phases skipped as `not_in_active_pack`, while `gbrain schema active` reported that same pack as active. It now resolves the pack the way `schema active` and the other schema commands do. The check still fails open to false when the pack cannot be resolved. Contributed by @harjothkhara.
+
+**Say to your agent:** *"Is my active schema pack declaring the extract_atoms phase, and will the cycle run it?"*
+
+### What you see
+
+| Where | What changed |
+|---|---|
+| A brain with `schema_pack` set only in the DB config | Pack-gated phases that its pack declares (for example `extract_atoms`) run in the cycle instead of being skipped as `not_in_active_pack`. Because some of those phases call a paid model, such a brain may start spending where it did not before; `gbrain schema active` already showed the pack as active. |
+| Brains configured by env var or config file | No change. |
+
+## To take advantage of v0.60.154.0
+
+Nothing to migrate. If you do not want a pack-gated phase to run, remove it from the pack or set the pack to one that does not declare it. Check which pack and phases apply with:
+
+```bash
+gbrain schema active
+```
+
 ## [0.60.153.0] - 2026-10-10
 
 **A repeated query in a long-running `gbrain serve` no longer waits on the embedding provider: about 110–150 ms faster per repeat, and 75 of 100 provider embed calls avoided on a realistic mix. Cold `search`, `query` and `stats` start 100–175 ms faster on both engines. Doctor's `eval_drift` stops paying 0.2–0.4 s per run on a freshly cloned or just-pulled source checkout. Rankings and output are unchanged.**
