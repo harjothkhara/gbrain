@@ -12,9 +12,9 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.154.0] - 2026-10-10
 
-**A schema pack chosen only in the database config now counts when the cycle decides which phases to run (#6393).**
+**The cycle's phase gate now sees a schema pack chosen in the database config, per source or brain-wide (#6393).**
 
-`packDeclaresPhase` resolved the active pack without the database tier, so a brain whose `schema_pack` was set only with `gbrain config set schema_pack <name>` had its pack-gated phases skipped as `not_in_active_pack`, while `gbrain schema active` reported that same pack as active. It now resolves the pack the way `schema active` and the other schema commands do. The check still fails open to false when the pack cannot be resolved. Contributed by @harjothkhara.
+`packDeclaresPhase` resolved the active pack without the database tiers, so a brain whose pack was set only with `gbrain config set schema_pack <name>` (or bound to one source with `schema_pack.source.<id>`) had its pack-gated phases skipped as `not_in_active_pack`, while `gbrain schema active` reported that same pack as active. The gate now resolves the pack the way `schema active` does, and the source-scoped `extract_atoms` gate honors the cycle's source, so a source bound to its own pack follows that pack. `synthesize_concepts` is brain-wide and uses the brain-wide pack. The check still fails open to false when the pack cannot be resolved. Contributed by @harjothkhara.
 
 **Say to your agent:** *"Is my active schema pack declaring the extract_atoms phase, and will the cycle run it?"*
 
@@ -22,7 +22,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 | Where | What changed |
 |---|---|
-| A brain with `schema_pack` set only in the DB config | Pack-gated phases that its pack declares (for example `extract_atoms`) run in the cycle instead of being skipped as `not_in_active_pack`. Because some of those phases call a paid model, such a brain may start spending where it did not before; `gbrain schema active` already showed the pack as active. |
+| A brain with `schema_pack` set only in the DB config, or a source bound with `schema_pack.source.<id>` | Pack-gated phases that the resolved pack declares (for example `extract_atoms`) run in the cycle instead of being skipped as `not_in_active_pack`; a source bound to a pack that does not declare the phase stays skipped. Because some of those phases call a paid model, such a brain may start spending where it did not before; `gbrain schema active` already showed the pack as active. |
 | Brains configured by env var or config file | No change. |
 
 ## To take advantage of v0.60.154.0
