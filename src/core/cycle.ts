@@ -1238,11 +1238,13 @@ export async function resolveSourceForDir(
 export async function packDeclaresPhase(
   engine: BrainEngine,
   phase: CyclePhase,
+  opts: { sourceId?: string } = {},
 ): Promise<boolean> {
   try {
-    // #6393: the same engine-aware resolver `schema active` uses, so a pack named only in the DB config counts.
+    // #6393: the same engine-aware resolver `schema active` uses, so a pack named only in the DB config counts
+    // and a source-scoped phase honors that source's own schema_pack.source.<id> binding.
     const { loadActivePackForEngine } = await import('./schema-pack/engine-resolution.ts');
-    const resolved = await loadActivePackForEngine(engine, { remote: false });
+    const resolved = await loadActivePackForEngine(engine, { remote: false, sourceId: opts.sourceId });
     const phases = resolved.manifest.phases ?? [];
     return phases.includes(phase);
   } catch {
@@ -2415,7 +2417,7 @@ export async function runCycle(
           summary: 'no database connected',
           details: { reason: 'no_database' },
         });
-      } else if (!(await packDeclaresPhase(engine, 'extract_atoms'))) {
+      } else if (!(await packDeclaresPhase(engine, 'extract_atoms', { sourceId: cycleSourceId ?? 'default' }))) {
         // issue #1678: the routine cycle skip stays cheap (no per-tick backlog
         // count), but the detail is greppable — `pack_gated: true` lets the
         // `extract_atoms_backlog` doctor check / log scrapers tell a
