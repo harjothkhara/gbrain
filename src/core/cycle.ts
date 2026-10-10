@@ -1240,10 +1240,9 @@ export async function packDeclaresPhase(
   phase: CyclePhase,
 ): Promise<boolean> {
   try {
-    const { loadActivePack } = await import('./schema-pack/load-active.ts');
-    const { loadConfig } = await import('./config.ts');
-    const cfg = loadConfig();
-    const resolved = await loadActivePack({ cfg, remote: false });
+    // #6393: the same engine-aware resolver `schema active` uses, so a pack named only in the DB config counts.
+    const { loadActivePackForEngine } = await import('./schema-pack/engine-resolution.ts');
+    const resolved = await loadActivePackForEngine(engine, { remote: false });
     const phases = resolved.manifest.phases ?? [];
     return phases.includes(phase);
   } catch {
