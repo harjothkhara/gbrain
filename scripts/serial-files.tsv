@@ -113,6 +113,7 @@ test/decide/retrieval-think.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HO
 test/decide/review-duplicate-kinds.serial.test.ts	global-state	global-state: replaces the process-wide gateway decide transport (__setDecideTransportForTests) and gateway config
 test/decide/review-withdraw.serial.test.ts	global-state	global-state: replaces the process-wide gateway decide and embed transports (__setDecideTransportForTests, __setEmbedTransportForTests) and gateway config
 test/decide/search-slots.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
+test/decide/status-newer-reference.serial.test.ts	global-state	global-state: patches console.log/console.error; configureGateway changes the process-wide AI gateway
 test/decide/status-no-entity.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/decide/triage-slot.serial.test.ts	global-state	global-state: process-wide test seams __setDecideTransportForTests, __setChatTransportForTests, __resetDecideStoreForTests; configureGateway changes the process-wide AI gateway
 test/decide/turn-context-s6.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)

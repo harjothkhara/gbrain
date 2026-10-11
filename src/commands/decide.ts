@@ -56,7 +56,7 @@ Subcommands:
   calibrate --slot <slot> --dataset <jsonl> [--target precision|recall|f1] [--min <x>]
             [--call-site <site>] [--dry-run] [--json]
   qualify --slot <slot> --dataset <jsonl> [--call-site <site>] [--json]
-  calibrations list [--slot <slot>] [--json] | adopt <id> | retire <id> | restore <id>
+  calibrations list [--slot <slot>] [--json] | adopt <id|ref:id> | retire <id> | restore <id>
   dataset --slot <slot> --from <source> <path> [--out <file>]
   receipts [--slot <slot>] [--since <hours>] [--what-if-threshold <t>] [--json]
 
@@ -196,7 +196,8 @@ export async function buildStatus(engine: BrainEngine, state: DecideState) {
     const p = policyFor(state, slot);
     const u = usage.find((x) => x.slot === slot);
     const inputs = policyInputs(state, slot);
-    const newestRef = REFERENCE_CALIBRATIONS.filter((r) => r.slot === slot && r.provider === p.provider).at(-1);
+    // #6497: only a reference for the call site the status line reports can be newer than the calibration in use.
+    const newestRef = REFERENCE_CALIBRATIONS.filter((r) => r.slot === slot && r.provider === p.provider && r.call_site === p.callSite).at(-1);
     return {
       slot, plain: SLOT_PLAIN_NAMES[slot], wired: SLOT_SPECS[slot].wired, mode: p.requested, effective: p.effective,
       readiness: readiness(p, inputs), inactive: p.inactive ?? null, provider: p.provider, model: p.model,

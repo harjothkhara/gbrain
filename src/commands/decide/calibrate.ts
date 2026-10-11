@@ -18,6 +18,7 @@ import { runDecideUnpacked } from '../../core/ai/decide/unpacked.ts';
 import { estimateContextTokens, planBatches } from '../../core/ai/decide/pack.ts';
 import { lookupModel, marginFor, policyFingerprint } from '../../core/ai/decide/policy.ts';
 import { refusalLine } from '../../core/ai/decide/outcomes.ts';
+import { REFERENCE_CALIBRATIONS } from '../../core/ai/decide/reference-calibrations.ts';
 import { toWireQuestion } from '../../core/ai/decide/providers/typesafe.ts';
 import { SLOT_SPECS } from '../../core/ai/decide/slots.ts';
 import { getCalibration, insertCalibration, listCalibrations, setCalibrationRetired, storeQualification } from '../../core/ai/decide/store.ts';
@@ -225,7 +226,18 @@ async function cmdCalibrations(engine: BrainEngine, args: string[]): Promise<num
     }
     return 0;
   }
-  const id = Number(String(args[1] ?? '').replace(/^local:/, ''));
+  const rawId = String(args[1] ?? '');
+  if (rawId.startsWith('ref:')) {
+    // #6497: a built-in reference calibration (the id `status` prints under "newer reference available").
+    if (action !== 'adopt') { console.error(`${rawId} is a reference calibration built in to this release; it cannot be ${action === 'retire' ? 'retired' : 'restored'}.`); return 1; }
+    const ref = REFERENCE_CALIBRATIONS.find((r) => `ref:${r.id}` === rawId);
+    if (!ref) { console.error(`reference calibration ${rawId} not found`); return 1; }
+    await engine.setConfig(`decide.slots.${ref.slot}.calibration`, rawId);
+    resetDecideSearchCache();
+    console.log(`${ref.slot} now uses ${rawId} (threshold ${ref.threshold.toFixed(3)} for ${ref.model_resolved}, call site ${ref.call_site}).`);
+    return 0;
+  }
+  const id = Number(rawId.replace(/^local:/, ''));
   if (!Number.isInteger(id) || id <= 0) { console.error(`Usage: gbrain decide calibrations ${action} <id>`); return 1; }
   const row = await getCalibration(engine, id);
   if (!row) { console.error(`calibration local:${id} not found`); return 1; }
