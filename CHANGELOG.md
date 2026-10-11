@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.174.0] - 2026-10-11
+
+**`gbrain decide status` only offers a newer reference calibration for the call site it reports, and the command it prints now runs (#6497).**
+
+With a TypeSafe key the `conflict` slot reports its sweep calibration, but `status` listed the later `review_withdraw` reference as "newer reference available" because the hint matched by slot and provider only. The suggested `gbrain decide calibrations adopt ref:...` also failed: `adopt` parsed every id as a number, so a `ref:` id printed the usage line and exited 1. The hint now requires the same slot, provider and call site as the calibration in use, so the conflict slot shows no hint until a newer sweep reference exists. `calibrations adopt` accepts a built-in `ref:<id>` and stores it in `decide.slots.<slot>.calibration`, the same value `enable --recommended` writes; an unknown reference exits 1 and writes nothing, and `retire` and `restore` refuse a built-in reference. Contributed by @harjothkhara.
+
+**Say to your agent:** *"Show me the decide status for the conflict slot, and tell me whether a newer reference calibration is available for it."*
+
+### What you see
+
+| Where | What changed |
+|---|---|
+| `gbrain decide status` | The `newer reference available` line appears only when a newer reference exists for the same slot, provider and call site as the calibration in use; the conflict slot no longer points at the `review_withdraw` row. |
+| `gbrain decide calibrations adopt ref:<id>` | Adopts the built-in reference (previously the usage line and exit 1). `gbrain decide --help` now lists `adopt` with either a local id or a `ref:` id. |
+
+## To take advantage of v0.60.174.0
+
+Nothing to migrate. If you adopted a calibration by hand, it is unchanged. To use a newer built-in reference when `status` offers one, run the command it prints, for example:
+
+```bash
+gbrain decide calibrations adopt ref:<id-from-status>
+```
+
 ## [0.60.173.0] - 2026-10-11
 
 **Two memory tests stop failing on the scheduled full E2E run, which keeps real provider keys.** Both asserted the keyless branch (`degraded_dedup: true` on `writeSingleFact`, `facts_degraded.reason: keyword_only_no_embedding_provider` on `recall`) while reading the gateway's key state from the process environment, so the nightly lane, which runs with `GBRAIN_TEST_KEEP_PROVIDER_KEYS=1` and an `OPENAI_API_KEY`, embedded for real and reported the keyed result. No product behaviour changes; both branches are now pinned on every lane.
